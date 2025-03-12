@@ -61,7 +61,7 @@ class SABnzbd(commands.Cog):
                     "name": item.get("filename", "Unknown"),
                     "progress": float(item.get("percentage", "0")),
                     "timeleft": item.get("timeleft", "Unknown"),
-                    "speed": self._format_size(queue.get("speed", "0")),
+                    "speed": self._format_speed_from_kbps(queue.get("kbpersec", "0")),
                     "size": self._format_size(item.get("size", "Unknown")),
                 }
                 for item in slots
@@ -87,6 +87,18 @@ class SABnzbd(commands.Cog):
         except ValueError:
             return size
 
+    def _format_speed_from_kbps(self, kbpersec: str) -> str:
+        """Convert speed from KB/s to human-readable format."""
+        try:
+            speed_float = float(kbpersec)
+            for unit in ["KB", "MB", "GB", "TB"]:
+                if speed_float < 1024:
+                    return f"{speed_float:.2f} {unit}/s"
+                speed_float /= 1024
+            return f"{speed_float:.2f} TB/s"
+        except ValueError:
+            return f"{kbpersec} KB/s"
+    
     def _format_size_diskspace(self, size: str, unit: str = "GB") -> str:
         """Format disk space size into specified unit (GB or TB)."""
         try:
@@ -115,7 +127,7 @@ class SABnzbd(commands.Cog):
             return (
                 f"**```{emoji} {name}\n"
                 f"└─ {progress_bar} {progress_percent:.1f}% | {download['timeleft']} remaining\n"
-                f" └─ 📊 {download['speed']}/s | Size: {download['size']}```**"
+                f" └─ 📊 {download['speed']} | Size: {download['size']}```**"
             )
         except (ValueError, KeyError) as e:
             self.logger.error(f"Error formatting download info: {e}")
