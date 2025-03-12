@@ -1,0 +1,7 @@
+discord.py
+plexapi
+requests
+aiohttp
+python-dateutil
+uptime_kuma_api
+python-dotenv
