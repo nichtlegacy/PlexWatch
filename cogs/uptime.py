@@ -5,7 +5,10 @@ from uptime_kuma_api import UptimeKumaApi, UptimeKumaException
 from typing import Tuple, Optional
 from dotenv import load_dotenv
 
-load_dotenv()
+RUNNING_IN_DOCKER = os.getenv("RUNNING_IN_DOCKER", "false").lower() == "true"
+
+if not RUNNING_IN_DOCKER:
+    load_dotenv()
 
 class Uptime(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:

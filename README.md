@@ -62,7 +62,7 @@ Here’s how PlexWatch looks in action:
 - Uptime Kuma (optional, for uptime monitoring)
 - A Discord bot token
 
-### Installation
+### Installation local
 1. **Clone the Repository**:
    ```bash
    git clone https://github.com/nichtlegacy/PlexWatch.git
@@ -85,6 +85,40 @@ Here’s how PlexWatch looks in action:
    ```bash
    python main.py
    ```
+   
+### Installation docker
+1. **Install the container and edit the required environment variables:**
+	- See the full list of available envs further below. 
+	- Make sure to mount the volume for persistent config changes.
+```
+services:
+  plexwatch:
+    image: ghcr.io/nichtlegacy/plexwatch:latest
+    container_name: plexwatch
+    environment:
+      - RUNNING_IN_DOCKER=true
+      - DISCORD_TOKEN=your_discord_bot_token
+      - DISCORD_AUTHORIZED_USERS=123456789012345678,987654321098765432
+      - PLEX_URL=https://your-plex-server:32400
+      - PLEX_TOKEN=your_plex_token
+      - CHANNEL_ID=your_discord_channel_id
+      
+      # Optional
+      # - SABNZBD_URL=http://192.168.1.1:8282
+      # - SABNZBD_API_KEY=your_sabnzbd_api_key
+
+      # Optional
+      # - UPTIME_URL=http://192.168.1.1:3001
+      # - UPTIME_USERNAME=your_kuma_username
+      # - UPTIME_PASSWORD=your_kuma_password
+      # - UPTIME_MONITOR_ID=your_monitor_id
+
+    volumes:
+      - ./plexwatch:/app/data
+    restart: unless-stopped
+```   
+
+2. **Start the container to run the bot**
 
 ### Environment Variables (`.env`)
 The `.env` file stores sensitive configuration. Use the following format:

@@ -12,8 +12,11 @@ from typing import List
 if platform.system() == "Windows":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
-# Load environment variables from .env file
-load_dotenv()
+RUNNING_IN_DOCKER = os.getenv("RUNNING_IN_DOCKER", "false").lower() == "true"
+
+if not RUNNING_IN_DOCKER:
+    load_dotenv() # Load environment variables from .env file
+    
 TOKEN = os.getenv("DISCORD_TOKEN")
 if not TOKEN:
     raise ValueError("DISCORD_TOKEN must be set in .env file")
@@ -26,15 +29,23 @@ LOG_DIR = "logs"
 os.makedirs(LOG_DIR, exist_ok=True)
 bot_logger = logging.getLogger("plexwatch_bot")
 bot_logger.setLevel(logging.DEBUG)
-file_handler = TimedRotatingFileHandler(
-    filename=os.path.join(LOG_DIR, "plexwatch_debug.log"),
-    when="midnight",
-    interval=1,
-    backupCount=7,
-    encoding="utf-8",
-)
-file_handler.setFormatter(logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
-bot_logger.addHandler(file_handler)
+
+formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+
+if RUNNING_IN_DOCKER:
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(formatter)
+    bot_logger.addHandler(console_handler)
+else:
+    file_handler = TimedRotatingFileHandler(
+        filename=os.path.join(LOG_DIR, "plexwatch_debug.log"),
+        when="midnight",
+        interval=1,
+        backupCount=7,
+        encoding="utf-8",
+    )
+    file_handler.setFormatter(formatter)
+    bot_logger.addHandler(file_handler)
 
 # Initialize bot with intents and command prefix
 intents = discord.Intents.all()

@@ -10,7 +10,10 @@ from typing import Optional, Dict, Any, List
 
 from dotenv import load_dotenv
 
-load_dotenv()
+RUNNING_IN_DOCKER = os.getenv("RUNNING_IN_DOCKER", "false").lower() == "true"
+
+if not RUNNING_IN_DOCKER:
+    load_dotenv()
 
 class PlexCore(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
