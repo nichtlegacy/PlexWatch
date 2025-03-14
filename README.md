@@ -102,6 +102,17 @@ services:
       - PLEX_URL=https://your-plex-server:32400
       - PLEX_TOKEN=your_plex_token
       - CHANNEL_ID=your_discord_channel_id
+      
+      # Optional
+      # - SABNZBD_URL=http://192.168.1.1:8282
+      # - SABNZBD_API_KEY=your_sabnzbd_api_key
+
+      # Optional
+      # - UPTIME_URL=http://192.168.1.1:3001
+      # - UPTIME_USERNAME=your_kuma_username
+      # - UPTIME_PASSWORD=your_kuma_password
+      # - UPTIME_MONITOR_ID=your_monitor_id
+
     volumes:
       - ./plexwatch:/app/data
     restart: unless-stopped
