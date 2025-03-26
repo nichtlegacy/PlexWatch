@@ -286,3 +286,13 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+## Star History
+
+<a href="https://www.star-history.com/#nichtlegacy/PlexWatch&Date">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=nichtlegacy/PlexWatch&type=Date&theme=dark" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=nichtlegacy/PlexWatch&type=Date" />
+   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=nichtlegacy/PlexWatch&type=Date" />
+ </picture>
+</a>
