@@ -6,12 +6,16 @@ permissions:
   id-token: write
 
 on:
+  push:
+    branches:
+      - main
+  release:
+    types:
+      - published
   workflow_dispatch:
 
 jobs:
-
   build:
-  
     runs-on: ubuntu-latest
 
     steps:
@@ -33,13 +37,11 @@ jobs:
       with:
         images: ghcr.io/${{ github.repository }}
         tags: |
-            type=ref,event=branch,suffix=-{{sha}}
-            type=ref,event=pr,suffix=-{{sha}}
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=sha
+          type=sha
+          type=semver,pattern={{version}}
+          type=ref,event=branch,prefix=main-
         flavor: |
-            latest=true
+          latest=${{ github.event_name == 'release' }}
 
     - name: Build and push Docker images
       uses: docker/build-push-action@v5
