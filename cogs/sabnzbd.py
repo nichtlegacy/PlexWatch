@@ -5,6 +5,7 @@ import os
 import json
 from typing import Dict, Any, List
 from dotenv import load_dotenv
+from urllib.parse import urljoin
 
 RUNNING_IN_DOCKER = os.getenv("RUNNING_IN_DOCKER", "false").lower() == "true"
 
@@ -36,7 +37,7 @@ class SABnzbd(commands.Cog):
 
     async def get_sabnzbd_info(self) -> Dict[str, Any]:
         """Fetch download queue and disk space information from SABnzbd API."""
-        url = f"{self.SABNZBD_URL}/api"
+        url = urljoin(self.SABNZBD_URL, "api")
         params = {"apikey": self.SABNZBD_API_KEY, "output": "json", "mode": "queue"}
         try:
             async with aiohttp.ClientSession() as session:
