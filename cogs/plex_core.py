@@ -260,6 +260,7 @@ class PlexCore(commands.Cog):
             section_title = getattr(session, "librarySectionTitle", "Unknown")
             stats = self.get_library_stats()
             content_emoji = stats.get(section_title, {}).get("emoji") or (
+                "🎵" if getattr(session, "type", "") == "track" else
                 "🎥" if getattr(session, "type", "") in ["movie", None] else "📺"
             )
 
@@ -276,8 +277,19 @@ class PlexCore(commands.Cog):
             total_time = self._format_time(str(timedelta(milliseconds=session.duration or 0)).split(".")[0], session.duration or 0)
 
             media = session.media[0] if hasattr(session, "media") and session.media else None
-            quality = f"{getattr(media, 'videoResolution', '1080')}p" if media else "1080p"
-            quality = quality[:-1] if quality.endswith("pp") else "4K" if quality in ["4kp", "4Kp"] else quality
+            
+            # Handle quality display based on content type
+            if getattr(session, "type", "") == "track":
+                # For music, show audio quality
+                audio_stream = next((stream for part in media.parts for stream in part.streams if stream.streamType == 2), None) if media else None
+                quality = f"{getattr(audio_stream, 'bitDepth', '')}bit" if audio_stream and getattr(audio_stream, 'bitDepth', None) else ""
+                if audio_stream and getattr(audio_stream, 'samplingRate', None):
+                    quality += f" {int(audio_stream.samplingRate/1000)}kHz" if quality else f"{int(audio_stream.samplingRate/1000)}kHz"
+                quality = quality if quality else "Audio"
+            else:
+                # For video content, show video quality
+                quality = f"{getattr(media, 'videoResolution', '1080')}p" if media else "1080p"
+                quality = quality[:-1] if quality.endswith("pp") else "4K" if quality in ["4kp", "4Kp"] else quality
 
             transcode_session = getattr(session, "transcodeSession", None)
             transcode_emoji = "🔄" if transcode_session else "⏯️"
@@ -310,7 +322,13 @@ class PlexCore(commands.Cog):
 
     def _get_formatted_title(self, session) -> str:
         """Format content title based on its type."""
-        if hasattr(session, "grandparentTitle"):
+        if hasattr(session, "type") and session.type == "track":
+            # Handle music tracks
+            artist = getattr(session, "grandparentTitle", "Unknown Artist")
+            track = getattr(session, "title", "Unknown Track")
+            return f"{artist} - {track}"
+        elif hasattr(session, "grandparentTitle"):
+            # Handle TV shows
             series_title = session.grandparentTitle.split(":")[0].split("-")[0].strip()
             episode_info = (
                 f"S{session.parentIndex:02d}E{session.index:02d}"
@@ -318,6 +336,7 @@ class PlexCore(commands.Cog):
                 else ""
             )
             return f"{series_title} - {episode_info}"
+        # Handle movies
         year = f" ({session.year})" if hasattr(session, "year") and session.year else ""
         return f"{session.title}{year}"
 
