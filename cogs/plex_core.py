@@ -328,15 +328,15 @@ class PlexCore(commands.Cog):
             track = getattr(session, "title", "Unknown Track")
             return f"{artist} - {track}"
         elif hasattr(session, "grandparentTitle"):
-            # Handle TV shows
-            series_title = session.grandparentTitle.split(":")[0].split("-")[0].strip()
+            # Handle TV shows - keep full title
+            series_title = session.grandparentTitle.strip()
             episode_info = (
                 f"S{session.parentIndex:02d}E{session.index:02d}"
                 if hasattr(session, "parentIndex") and hasattr(session, "index")
                 else ""
             )
             return f"{series_title} - {episode_info}"
-        # Handle movies
+        # Handle movies - keep full title with year
         year = f" ({session.year})" if hasattr(session, "year") and session.year else ""
         return f"{session.title}{year}"
 

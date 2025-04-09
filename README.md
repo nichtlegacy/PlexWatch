@@ -1,7 +1,7 @@
 # PlexWatch - Your Plex Dashboard in Discord
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
-![Version](https://img.shields.io/badge/version-1.1.2-green.svg)
+[![Version](https://img.shields.io/github/release/nichtlegacy/PlexWatch.svg?style=flat-square)](https://github.com/nichtlegacy/PlexWatch/releases/latest)
 ![Python](https://img.shields.io/badge/python-3.8+-yellow.svg)
 ![Discord.py](https://img.shields.io/badge/discord.py-2.0+-blueviolet.svg)
 ![Plex](https://img.shields.io/badge/plex-compatible-orange.svg)
