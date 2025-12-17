@@ -1,5 +1,8 @@
 *.log
+*.json
 .env
 __pycache__/
 data/dashboard_message_id.json
+data/config.json
+data/user_mapping.json
 /.venv

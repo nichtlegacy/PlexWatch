@@ -7,6 +7,8 @@ import os
 import logging
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, List
+import io
+import aiohttp
 
 from dotenv import load_dotenv
 
@@ -14,6 +16,743 @@ RUNNING_IN_DOCKER = os.getenv("RUNNING_IN_DOCKER", "false").lower() == "true"
 
 if not RUNNING_IN_DOCKER:
     load_dotenv()
+
+
+class StreamDetailsView(discord.ui.View):
+    """Persistent view for stream detail buttons."""
+    
+    def __init__(self, plex_core_instance):
+        super().__init__(timeout=None)  # Persistent view
+        self.plex_core = plex_core_instance
+        self.logger = logging.getLogger("plexwatch_bot.plex.view")
+    
+    async def create_buttons(self, sessions: List[Any]) -> None:
+        """Create/update buttons for active streams. Only works with Tautulli configured."""
+        self.clear_items()
+        
+        # Clear old sessions before adding new ones
+        self.plex_core.active_sessions.clear()
+        
+        # Only show buttons if Tautulli is configured
+        if not self.plex_core.TAUTULLI_URL or not self.plex_core.TAUTULLI_API_KEY:
+            return
+        
+        # Limit to 8 streams (dashboard shows max 8)
+        for idx, session in enumerate(sessions[:8], start=1):
+            try:
+                # Validate session has required attributes
+                if not hasattr(session, 'sessionKey'):
+                    self.logger.warning(f"Session {idx} missing sessionKey attribute")
+                    continue
+                
+                # Create a unique session key
+                session_key = f"{session.sessionKey}_{idx}"
+                
+                # Store session in plex_core for later retrieval
+                self.plex_core.active_sessions[session_key] = session
+                
+                # Get user for button label
+                user = session.usernames[0] if hasattr(session, 'usernames') and session.usernames else "Unknown"
+                displayed_user = self.plex_core.user_mapping.get(user, user)
+                
+                # Truncate long usernames for button label
+                if len(displayed_user) > 15:
+                    displayed_user = displayed_user[:12] + "..."
+                
+                # Get emoji based on media type (same logic as dashboard)
+                section_title = getattr(session, "librarySectionTitle", "Unknown")
+                stats = self.plex_core.get_library_stats()
+                content_emoji = stats.get(section_title, {}).get("emoji") or (
+                    "🎵" if getattr(session, "type", "") == "track" else
+                    "🎥" if getattr(session, "type", "") in ["movie", None] else "📺"
+                )
+                
+                # Create button
+                button = discord.ui.Button(
+                    label=f"Stream {idx} - {displayed_user}",
+                    style=discord.ButtonStyle.primary,
+                    custom_id=f"stream_details:{session_key}",
+                    emoji=content_emoji
+                )
+                button.callback = self._create_callback(session_key)
+                self.add_item(button)
+            except Exception as e:
+                self.logger.error(f"Error creating button for stream {idx}: {e}", exc_info=True)
+    
+    def _create_callback(self, session_key: str):
+        """Create a callback function for a specific session."""
+        async def callback(interaction: discord.Interaction):
+            await self.show_stream_details(interaction, session_key)
+        return callback
+    
+    async def show_stream_details(self, interaction: discord.Interaction, session_key: str) -> None:
+        """Show detailed information about a specific stream."""
+        try:
+            await interaction.response.defer(ephemeral=True)
+            
+            # Check if Plex is connected
+            if not self.plex_core.plex:
+                await interaction.followup.send(
+                    "❌ Plex server is not connected. Please try again later.",
+                    ephemeral=True
+                )
+                return
+            
+            # Retrieve session from stored sessions
+            session = self.plex_core.active_sessions.get(session_key)
+            
+            if not session:
+                await interaction.followup.send(
+                    "❌ This stream is no longer active or could not be found.",
+                    ephemeral=True
+                )
+                return
+            
+            # Verify session is still valid by checking if it has required attributes
+            if not hasattr(session, 'sessionKey'):
+                self.logger.warning(f"Session {session_key} missing required attributes")
+                await interaction.followup.send(
+                    "❌ This stream session is invalid.",
+                    ephemeral=True
+                )
+                return
+            
+            # Create detailed embed and file
+            embed, file = await self._create_detailed_embed(session)
+            
+            # Check if embed creation failed
+            if embed.title == "❌ Error":
+                await interaction.followup.send(embed=embed, ephemeral=True)
+                return
+            
+            # Create view with Kill Stream button if user is authorized
+            view = discord.ui.View(timeout=300)  # 5 minute timeout for kill button
+            
+            if interaction.user.id in self.plex_core.AUTHORIZED_USERS:
+                kill_button = discord.ui.Button(
+                    label="Kill Stream",
+                    style=discord.ButtonStyle.danger,
+                    emoji="⛔"
+                )
+                kill_button.callback = self._create_kill_callback(session_key)
+                view.add_item(kill_button)
+            
+            # Send message with embed and optional file
+            if file:
+                await interaction.followup.send(embed=embed, file=file, view=view, ephemeral=True)
+            else:
+                await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+            
+        except discord.errors.NotFound:
+            self.logger.error(f"Interaction not found for session {session_key}")
+        except discord.errors.HTTPException as e:
+            self.logger.error(f"Discord HTTP error showing stream details: {e}", exc_info=True)
+            try:
+                await interaction.followup.send(
+                    "❌ Failed to send stream details due to a Discord error.",
+                    ephemeral=True
+                )
+            except Exception:
+                pass
+        except Exception as e:
+            self.logger.error(f"Unexpected error showing stream details: {e}", exc_info=True)
+            try:
+                await interaction.followup.send(
+                    "❌ An unexpected error occurred while retrieving stream details.",
+                    ephemeral=True
+                )
+            except Exception:
+                pass
+    
+    def _create_kill_callback(self, session_key: str):
+        """Create a callback function for opening kill stream modal."""
+        async def callback(interaction: discord.Interaction):
+            # Check authorization first
+            if interaction.user.id not in self.plex_core.AUTHORIZED_USERS:
+                await interaction.response.send_message(
+                    "❌ You are not authorized to kill streams.",
+                    ephemeral=True
+                )
+                return
+            
+            # Create and show modal
+            modal = KillStreamModal(self.plex_core, session_key)
+            await interaction.response.send_modal(modal)
+        return callback
+    
+    async def _create_detailed_embed(self, session) -> tuple[discord.Embed, Optional[discord.File]]:
+        """Create a detailed embed with stream information from Tautulli. Returns (embed, file)."""
+        file = None
+        try:
+            # Validate session object
+            if not session or not hasattr(session, 'sessionKey'):
+                raise ValueError("Session object is invalid")
+            
+            # Fetch Tautulli data (required)
+            tautulli_data = await self.plex_core.fetch_tautulli_session(session.sessionKey)
+            if not tautulli_data:
+                raise ValueError("Could not fetch data from Tautulli")
+            
+            # Get user from Plex session (same as dashboard/button for consistency)
+            user = session.usernames[0] if hasattr(session, 'usernames') and session.usernames else "Unknown"
+            displayed_user = self.plex_core.user_mapping.get(user, user)
+            
+            # Build title from Tautulli
+            media_type = tautulli_data.get("media_type", "movie")
+            year = tautulli_data.get("year", "")
+            
+            if media_type == "episode":
+                # For TV shows: "Show Name - S01E02 - Episode Title"
+                show_name = tautulli_data.get("grandparent_title", "")
+                season = int(tautulli_data.get("parent_media_index") or 0)
+                episode = int(tautulli_data.get("media_index") or 0)
+                episode_title = tautulli_data.get("title", "")
+                title = f"{show_name} - S{season:02d}E{episode:02d} - {episode_title}"
+                emoji = "📺"
+            elif media_type == "track":
+                # For music: "Artist - Track"
+                artist = tautulli_data.get("grandparent_title", "")
+                track = tautulli_data.get("title", "")
+                title = f"{artist} - {track}"
+                emoji = "🎵"
+            else:
+                # For movies: "Title (Year)"
+                movie_title = tautulli_data.get("title", "Unknown")
+                title = f"{movie_title} ({year})" if year else movie_title
+                emoji = "🎥"
+            
+            section_title = tautulli_data.get("library_name", "Unknown")
+            
+            # Create embed
+            embed = discord.Embed(
+                title=f"{emoji} {title}",
+                color=discord.Color.blue(),
+                timestamp=discord.utils.utcnow()
+            )
+            
+            # Get poster image from Tautulli
+            file = await self.plex_core.get_tautulli_thumbnail(tautulli_data)
+            if file:
+                embed.set_thumbnail(url="attachment://poster.jpg")
+            
+            # Description (summary) from Tautulli
+            summary = tautulli_data.get("summary", "")
+            if summary and media_type != "track":
+                if len(summary) > 300:
+                    summary = summary[:297] + "..."
+                embed.add_field(name="📝 Description", value=summary, inline=False)
+            
+            # Rating & Directors/Writers from Tautulli
+            if media_type != "track":
+                rating = tautulli_data.get("rating")
+                has_rating = False
+                if rating:
+                    try:
+                        embed.add_field(name="⭐ Rating", value=f"`{float(rating):.1f}/10`", inline=True)
+                        has_rating = True
+                    except (ValueError, TypeError):
+                        pass
+                
+                # Directors (for movies) or Writers (for episodes)
+                has_creator = False
+                if media_type == "movie":
+                    directors = tautulli_data.get("directors", [])
+                    if directors:
+                        director = directors[0] if isinstance(directors, list) else directors.split(",")[0].strip()
+                        embed.add_field(name="🎬 Director", value=f"`{director}`", inline=True)
+                        has_creator = True
+                elif media_type == "episode":
+                    writers = tautulli_data.get("writers", [])
+                    if writers:
+                        writer = writers[0] if isinstance(writers, list) else writers.split(",")[0].strip()
+                        embed.add_field(name="✍️ Writer", value=f"`{writer}`", inline=True)
+                        has_creator = True
+                
+                if has_rating and has_creator:
+                    embed.add_field(name="\u200b", value="\u200b", inline=True)
+            
+            # User and Player info from Tautulli
+            product_name = tautulli_data.get("player", "Unknown")
+                
+            embed.add_field(name="👤 User", value=f"`{displayed_user}`", inline=True)
+            embed.add_field(name="📱 Player", value=f"`{product_name}`", inline=True)
+            embed.add_field(name="📚 Library", value=f"`{section_title}`", inline=True)
+            
+            # Progress, Status & Connection Info (in one row)
+            view_offset = int(tautulli_data.get("view_offset", 0) or 0)
+            duration = int(tautulli_data.get("duration", 0) or 0)
+            
+            # Stream Status & Connection Info
+            location = tautulli_data.get("location", "")
+            secure = tautulli_data.get("secure", 0)
+            relay = tautulli_data.get("relay", 0)
+            state = tautulli_data.get("state", "playing")
+            
+            # Stream status
+            state_emoji = "▶️" if state == "playing" else ("⏸️" if state == "paused" else "⏳")
+            state_text = state.capitalize()
+            status_info = f"`{state_emoji} {state_text}`"
+            
+            # Connection status
+            location_emoji = "🏠" if location == "lan" else "🌐"
+            location_text = "LAN" if location == "lan" else "WAN"
+            secure_emoji = "🔒" if secure else "🔓"
+            relay_text = " 🔀" if relay else ""
+            connection_info = f"`{location_emoji} {location_text} {secure_emoji}{relay_text}`"
+            
+            # Progress information
+            if duration > 0:
+                # Tautulli provides these in milliseconds
+                progress_percent = (view_offset / duration * 100)
+                
+                # Progress bar
+                progress_bar = f"[{'▓' * int(progress_percent / 10)}{'░' * (10 - int(progress_percent / 10))}]"
+                
+                # Time formatting (Tautulli gives ms)
+                current_time = str(timedelta(milliseconds=view_offset)).split(".")[0]
+                total_time = str(timedelta(milliseconds=duration)).split(".")[0]
+                
+                # Remove leading zeros for hours if < 1 hour
+                if current_time.startswith("0:"):
+                    current_time = current_time[2:]
+                if total_time.startswith("0:"):
+                    total_time = total_time[2:]
+                
+                progress_value = f"`{progress_bar} {progress_percent:.1f}%`\n`{current_time} / {total_time}`"
+            else:
+                progress_value = "`N/A`"
+            
+            # Add all three in one row: Progress (left), Status (middle), Connection (right)
+            embed.add_field(name="📊 Progress", value=progress_value, inline=True)
+            embed.add_field(name="⏯️ Status", value=status_info, inline=True)
+            embed.add_field(name="🌍 Connection", value=connection_info, inline=True)
+            
+            # --- File & Quality Info ---
+            # Resolution
+            resolution = tautulli_data.get("video_resolution", "Unknown")
+            
+            # Format resolution text
+            def format_resolution(res):
+                if not res or res == "Unknown":
+                    return "Unknown"
+                res_str = str(res).lower()
+                if res_str == "4k" or res_str == "2160":
+                    return "4K"
+                elif res_str.isdigit():
+                    return f"{res_str}p"
+                else:
+                    return res_str.upper()
+            
+            resolution = format_resolution(resolution)
+            
+            # Bitrate
+            bitrate_val = int(tautulli_data.get('bitrate', 0) or 0)
+            bitrate = f"{bitrate_val / 1000:.1f} Mbps" if bitrate_val > 0 else "Unknown"
+            
+            # File Size & Container
+            file_size = tautulli_data.get("file_size", 0)
+            container = tautulli_data.get("container", "Unknown").upper()
+            
+            # Display File Info Fields
+            if media_type == "track":
+                # For music
+                audio_bitrate = tautulli_data.get("audio_bitrate", "Unknown")
+                embed.add_field(name="🎵 Audio Quality", value=f"`{audio_bitrate} kbps`", inline=True)
+                embed.add_field(name="📊 Bitrate", value=f"`{bitrate}`", inline=True)
+                embed.add_field(name="\u200b", value="\u200b", inline=True)
+            else:
+                # For video (movies/TV)
+                embed.add_field(name="📺 Resolution", value=f"`{resolution}`", inline=True)
+                embed.add_field(name="📊 Bitrate", value=f"`{bitrate}`", inline=True)
+                if file_size:
+                    try:
+                        size_gb = int(file_size) / (1024**3)
+                        embed.add_field(name="📁 File", value=f"`{size_gb:.2f} GB • {container}`", inline=True)
+                    except (ValueError, TypeError):
+                        embed.add_field(name="📁 Container", value=f"`{container}`", inline=True)
+                else:
+                    embed.add_field(name="📁 Container", value=f"`{container}`", inline=True)
+            
+            # --- Transcoding Info from Tautulli ---
+            transcode_text = []
+            is_transcoding = tautulli_data.get("transcode_decision") == "transcode"
+            
+            # Check for throttled status
+            is_throttled = tautulli_data.get("transcode_throttled", 0)
+            throttled_text = " (Throttled)" if is_throttled else ""
+            
+            if is_transcoding:
+                # Hardware Transcoding flags
+                hw_decode = tautulli_data.get("transcode_hw_decoding", 0)
+                hw_encode = tautulli_data.get("transcode_hw_encoding", 0)
+                hw_text = " (HW)" if (hw_decode or hw_encode) else ""
+                
+                # Stream status
+                transcode_text.append(f"**Stream:** Transcode{throttled_text}")
+                
+                # Container
+                stream_container = tautulli_data.get("stream_container", "Unknown").upper()
+                container_decision = tautulli_data.get("stream_container_decision", "copy")
+                
+                if container_decision == "transcode":
+                    transcode_text.append(f"**Container:** Converting (`{container}` → `{stream_container}`)")
+                else:
+                    transcode_text.append(f"**Container:** `{container}` (Direct Stream)")
+                
+                # Video
+                video_codec = tautulli_data.get("video_codec", "Unknown").upper()
+                stream_video_codec = tautulli_data.get("stream_video_codec", "Unknown").upper()
+                video_resolution = tautulli_data.get("video_resolution", "")
+                stream_video_resolution = tautulli_data.get("stream_video_resolution", "")
+                video_decision = tautulli_data.get("stream_video_decision", "copy")
+                
+                # Format video resolution (use same function as above)
+                video_resolution = format_resolution(video_resolution)
+                stream_video_resolution = format_resolution(stream_video_resolution)
+                
+                if video_decision == "transcode":
+                    video_from = f"{video_codec}{hw_text} {video_resolution}".strip()
+                    video_to = f"{stream_video_codec}{hw_text} {stream_video_resolution}".strip()
+                    transcode_text.append(f"**Video:** Transcode (`{video_from}` → `{video_to}`)")
+                else:
+                    video_info = f"{video_codec} {video_resolution}".strip()
+                    transcode_text.append(f"**Video:** Direct Stream (`{video_info}`)")
+                
+                # Audio
+                audio_codec = tautulli_data.get("audio_codec", "Unknown").upper()
+                stream_audio_codec = tautulli_data.get("stream_audio_codec", "Unknown").upper()
+                audio_language = tautulli_data.get("audio_language", "")
+                audio_channels = tautulli_data.get("audio_channels", "")
+                stream_audio_channels = tautulli_data.get("stream_audio_channels", "")
+                audio_decision = tautulli_data.get("stream_audio_decision", "copy")
+                
+                # Format audio channels (6 = 5.1, 2 = 2.0, 8 = 7.1)
+                def format_channels(ch):
+                    if not ch:
+                        return ""
+                    ch = str(ch)
+                    if ch == "6":
+                        return "5.1"
+                    elif ch == "2":
+                        return "2.0"
+                    elif ch == "8":
+                        return "7.1"
+                    return ch
+                
+                audio_ch = format_channels(audio_channels)
+                stream_audio_ch = format_channels(stream_audio_channels)
+                
+                if audio_decision == "transcode":
+                    audio_from_parts = []
+                    if audio_language:
+                        audio_from_parts.append(audio_language)
+                    audio_from_parts.append("-")
+                    audio_from_parts.append(audio_codec)
+                    if audio_ch:
+                        audio_from_parts.append(audio_ch)
+                    audio_from = " ".join(audio_from_parts)
+                    
+                    audio_to_parts = [stream_audio_codec]
+                    if stream_audio_ch:
+                        audio_to_parts.append(stream_audio_ch)
+                    audio_to = " ".join(audio_to_parts)
+                    
+                    transcode_text.append(f"**Audio:** Transcode (`{audio_from}` → `{audio_to}`)")
+                else:
+                    transcode_text.append("**Audio:** Direct Stream")
+                
+                # Speed (nur anzeigen wenn > 0.0)
+                speed = tautulli_data.get("transcode_speed")
+                if speed:
+                    try:
+                        speed_float = float(speed)
+                        if speed_float > 0.0:
+                            transcode_text.append(f"**Speed:** `{speed_float:.1f}x`")
+                    except (ValueError, TypeError):
+                        pass
+            
+            # Subtitles (always show, even if None)
+            sub_decision = tautulli_data.get("stream_subtitle_decision")
+            subtitle_text = None
+            
+            if sub_decision and sub_decision not in ["none", ""]:
+                sub_lang = tautulli_data.get("subtitle_language", "Unknown")
+                sub_codec = tautulli_data.get("subtitle_codec", "Unknown").upper()
+                forced = " (Forced)" if tautulli_data.get("subtitle_forced") else ""
+                
+                if sub_decision == "burn":
+                    subtitle_text = f"Burn ({sub_lang} - {sub_codec}){forced}"
+                elif sub_decision == "transcode":
+                    subtitle_text = f"Converting ({sub_lang} - {sub_codec}){forced}"
+                else:
+                    subtitle_text = f"{sub_lang} ({sub_codec}){forced}"
+                
+                if is_transcoding:
+                    transcode_text.append(f"**Subtitle:** {subtitle_text}")
+            else:
+                # Show "None" if no subtitles
+                if is_transcoding:
+                    transcode_text.append("**Subtitle:** None")
+
+            # Display Transcoding / Playback Mode
+            if is_transcoding:
+                embed.add_field(
+                    name="🔄 Transcoding",
+                    value="\n".join(transcode_text) if transcode_text else "`Active`",
+                    inline=False
+                )
+            else:
+                # Direct Play
+                direct_play_text = ["`Direct Play`"]
+                
+                # Subtitles for direct play
+                if subtitle_text:
+                    direct_play_text.append(f"**Subtitle:** {subtitle_text}")
+                else:
+                    direct_play_text.append("**Subtitle:** None")
+
+                embed.add_field(
+                    name="⏯️ Playback Mode",
+                    value="\n".join(direct_play_text),
+                    inline=False
+                )
+            
+            # Footer: Title + Year
+            dashboard_config = self.plex_core.config.get("dashboard", {})
+            footer_icon = dashboard_config.get("footer_icon_url", "")
+            
+            # Build footer with title and year
+            if media_type == "episode":
+                footer_title = tautulli_data.get("grandparent_title", title)
+            else:
+                footer_title = tautulli_data.get("title", title)
+            
+            footer_text = f"{footer_title} ({year})" if year else footer_title
+            embed.set_footer(text=footer_text, icon_url=footer_icon)
+            
+            # Set author with dashboard icon
+            dashboard_name = dashboard_config.get("name", "Plex Dashboard")
+            icon_url = dashboard_config.get("icon_url", "")
+            if icon_url:
+                embed.set_author(name=dashboard_name, icon_url=icon_url)
+            
+            return embed, file
+            
+        except Exception as e:
+            self.logger.error(f"Error creating detailed embed: {e}", exc_info=True)
+            # Return a basic error embed
+            embed = discord.Embed(
+                title="❌ Error",
+                description="Failed to load stream details from Tautulli",
+                color=discord.Color.red()
+            )
+            return embed, None
+
+
+class KillStreamModal(discord.ui.Modal, title="Kill Stream"):
+    """Modal for confirming and customizing kill stream message."""
+    
+    def __init__(self, plex_core_instance, session_key: str):
+        super().__init__()
+        self.plex_core = plex_core_instance
+        self.session_key = session_key
+        self.logger = logging.getLogger("plexwatch_bot.plex.modal")
+        
+        # Create text input for custom message
+        self.reason_input = discord.ui.TextInput(
+            label="Reason Message",
+            placeholder="Stopped by administrator",
+            default="Stopped by administrator",
+            required=True,
+            max_length=200,
+            style=discord.TextStyle.short
+        )
+        self.add_item(self.reason_input)
+    
+    async def on_submit(self, interaction: discord.Interaction):
+        """Handle modal submission - kill the stream."""
+        await interaction.response.defer(ephemeral=True)
+        await self.kill_stream(interaction, self.reason_input.value)
+    
+    async def kill_stream(self, interaction: discord.Interaction, reason: str) -> None:
+        """Kill a stream (authorized users only)."""
+        try:
+            # Double-check authorization
+            if interaction.user.id not in self.plex_core.AUTHORIZED_USERS:
+                self.logger.warning(
+                    f"Unauthorized kill stream attempt by {interaction.user.name} (ID: {interaction.user.id})"
+                )
+                await interaction.followup.send(
+                    "❌ You are not authorized to kill streams.",
+                    ephemeral=True
+                )
+                return
+            
+            # Check if Plex is connected
+            if not self.plex_core.plex:
+                await interaction.followup.send(
+                    "❌ Plex server is not connected. Cannot kill stream.",
+                    ephemeral=True
+                )
+                return
+            
+            # Retrieve session
+            session = self.plex_core.active_sessions.get(self.session_key)
+            
+            if not session:
+                await interaction.followup.send(
+                    "❌ This stream is no longer active.",
+                    ephemeral=True
+                )
+                return
+            
+            # Get stream info for logging and embed (before killing)
+            try:
+                user = session.usernames[0] if hasattr(session, 'usernames') and session.usernames else "Unknown"
+                title = self.plex_core._get_formatted_title(session)
+                session_id = getattr(session, 'sessionKey', 'Unknown')
+            except Exception as e:
+                self.logger.error(f"Error extracting session info before kill: {e}")
+                user = "Unknown"
+                title = "Unknown"
+                session_id = "Unknown"
+            
+            # Fetch Tautulli data for embed details (before killing)
+            tautulli_data = None
+            try:
+                tautulli_data = await self.plex_core.fetch_tautulli_session(session.sessionKey)
+            except Exception as e:
+                self.logger.warning(f"Could not fetch Tautulli data for kill embed: {e}")
+            
+            # Kill the stream with custom reason
+            try:
+                session.stop(reason=reason)
+            except AttributeError as e:
+                self.logger.error(f"Session object missing stop method: {e}")
+                await interaction.followup.send(
+                    "❌ Failed to kill stream: Invalid session object.",
+                    ephemeral=True
+                )
+                return
+            except Exception as e:
+                self.logger.error(f"Plex API error killing stream: {e}", exc_info=True)
+                await interaction.followup.send(
+                    f"❌ Failed to kill stream: Plex API error - {str(e)}",
+                    ephemeral=True
+                )
+                return
+            
+            # Log the action
+            self.logger.info(
+                f"Stream killed by {interaction.user.name} (ID: {interaction.user.id}) - "
+                f"User: {user}, Title: {title}, Session: {session_id}, Reason: {reason}"
+            )
+            
+            # Remove from active sessions
+            self.plex_core.active_sessions.pop(self.session_key, None)
+            
+            # Create embed for success message
+            embed = discord.Embed(
+                title="✅ Stream Killed Successfully",
+                color=discord.Color.red(),
+                timestamp=discord.utils.utcnow()
+            )
+            
+            # Get media type and format title
+            if tautulli_data:
+                media_type = tautulli_data.get("media_type", "movie")
+                year = tautulli_data.get("year", "")
+                
+                if media_type == "episode":
+                    # For episodes: Show Name (Year) + Season/Episode field
+                    show_name = tautulli_data.get("grandparent_title", title)
+                    season = int(tautulli_data.get("parent_media_index") or 0)
+                    episode = int(tautulli_data.get("media_index") or 0)
+                    episode_title = tautulli_data.get("title", "")
+                    
+                    footer_title = f"{show_name} ({year})" if year else show_name
+                    embed.add_field(name="📺 Series", value=f"`{footer_title}`", inline=True)
+                    embed.add_field(name="🔑 Session", value=f"`{session_id}`", inline=True)
+                    embed.add_field(name="\u200b", value="\u200b", inline=True)
+                    embed.add_field(name="📋 Episode", value=f"`S{season:02d}E{episode:02d} - {episode_title}`", inline=False)
+                elif media_type == "track":
+                    # For music: Artist - Track
+                    artist = tautulli_data.get("grandparent_title", "")
+                    track = tautulli_data.get("title", "")
+                    footer_title = f"{artist} - {track}"
+                    embed.add_field(name="🎵 Track", value=f"`{footer_title}`", inline=True)
+                    embed.add_field(name="🔑 Session", value=f"`{session_id}`", inline=True)
+                    embed.add_field(name="\u200b", value="\u200b", inline=True)
+                else:
+                    # For movies: Title (Year)
+                    movie_title = tautulli_data.get("title", title)
+                    footer_title = f"{movie_title} ({year})" if year else movie_title
+                    embed.add_field(name="🎥 Movie", value=f"`{footer_title}`", inline=True)
+                    embed.add_field(name="🔑 Session", value=f"`{session_id}`", inline=True)
+                    embed.add_field(name="\u200b", value="\u200b", inline=True)
+            else:
+                # Fallback if no Tautulli data
+                embed.add_field(name="📺 Title", value=f"`{title}`", inline=True)
+                embed.add_field(name="🔑 Session", value=f"`{session_id}`", inline=True)
+                embed.add_field(name="\u200b", value="\u200b", inline=True)
+            
+            embed.add_field(name="👤 User", value=f"`{user}`", inline=True)
+            embed.add_field(name="💬 Reason", value=f"`{reason}`", inline=True)
+            embed.add_field(name="\u200b", value="\u200b", inline=True)
+            
+            # Footer and Author (like dashboard)
+            dashboard_config = self.plex_core.config.get("dashboard", {})
+            footer_icon = dashboard_config.get("footer_icon_url", "")
+            icon_url = dashboard_config.get("icon_url", "")
+            
+            # Set thumbnail with dashboard icon
+            if icon_url:
+                embed.set_thumbnail(url=icon_url)
+            
+            if tautulli_data:
+                media_type = tautulli_data.get("media_type", "movie")
+                year = tautulli_data.get("year", "")
+                
+                if media_type == "episode":
+                    footer_title = tautulli_data.get("grandparent_title", title)
+                else:
+                    footer_title = tautulli_data.get("title", title)
+                
+                footer_text = f"{footer_title} ({year})" if year else footer_title
+            else:
+                footer_text = title
+            
+            embed.set_footer(text=footer_text, icon_url=footer_icon)
+            
+            # Set author with dashboard icon
+            dashboard_name = dashboard_config.get("name", "Plex Dashboard")
+            if icon_url:
+                embed.set_author(name=dashboard_name, icon_url=icon_url)
+            
+            # Send embed
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            
+        except discord.errors.NotFound:
+            self.logger.error(f"Interaction not found for kill stream {self.session_key}")
+        except discord.errors.HTTPException as e:
+            self.logger.error(f"Discord HTTP error killing stream: {e}", exc_info=True)
+            try:
+                await interaction.followup.send(
+                    "❌ Failed to kill stream due to a Discord error.",
+                    ephemeral=True
+                )
+            except Exception:
+                pass
+        except Exception as e:
+            self.logger.error(f"Unexpected error killing stream: {e}", exc_info=True)
+            try:
+                await interaction.followup.send(
+                    "❌ An unexpected error occurred while killing the stream.",
+                    ephemeral=True
+                )
+            except Exception:
+                pass
+
 
 class PlexCore(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
@@ -23,6 +762,9 @@ class PlexCore(commands.Cog):
         # Load environment variables
         self.PLEX_URL = os.getenv("PLEX_URL")
         self.PLEX_TOKEN = os.getenv("PLEX_TOKEN")
+        self.TAUTULLI_URL = os.getenv("TAUTULLI_URL")
+        self.TAUTULLI_API_KEY = os.getenv("TAUTULLI_API_KEY")
+        
         channel_id = os.getenv("CHANNEL_ID")
         if channel_id is None:
             self.logger.error("CHANNEL_ID not set in .env file")
@@ -48,6 +790,18 @@ class PlexCore(commands.Cog):
         self.library_cache: Dict[str, Dict[str, Any]] = {}
         self.last_library_update: Optional[datetime] = None
         self.library_update_interval = self.config.get("cache", {}).get("library_update_interval", 900)
+
+        # Session tracking for stream details buttons
+        self.active_sessions: Dict[str, Any] = {}  # Maps session_key to Plex session object
+        
+        # Load authorized users for Kill Stream functionality
+        authorized_users_str = os.getenv("DISCORD_AUTHORIZED_USERS", "")
+        self.AUTHORIZED_USERS: List[int] = [
+            int(user_id) for user_id in authorized_users_str.split(",") if user_id
+        ]
+
+        # Initialize stream details view
+        self.stream_view = StreamDetailsView(self)
 
         self.user_mapping = self._load_user_mapping()
         self.update_status.start()
@@ -112,6 +866,80 @@ class PlexCore(commands.Cog):
         except Exception as e:  # Using generic Exception as plexapi doesn't expose a single base exception
             self.logger.error(f"Failed to connect to Plex server: {e}")
             self.plex_start_time = None
+            return None
+
+    async def fetch_tautulli_session(self, session_key: str) -> Optional[Dict[str, Any]]:
+        """Async fetch of Tautulli session data."""
+        if not self.TAUTULLI_URL or not self.TAUTULLI_API_KEY:
+            return None
+            
+        try:
+            base_url = self.TAUTULLI_URL.rstrip("/")
+            url = f"{base_url}/api/v2"
+            params = {
+                "apikey": self.TAUTULLI_API_KEY,
+                "cmd": "get_activity"
+            }
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, params=params) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        if data.get("response", {}).get("result") == "success":
+                            # Find our session in the sessions list
+                            sessions = data["response"]["data"]["sessions"]
+                            # Tautulli session_key matches Plex session_key
+                            for s in sessions:
+                                if str(s.get("session_key")) == str(session_key):
+                                    return s
+            return None
+        except Exception as e:
+            self.logger.error(f"Error fetching from Tautulli: {e}")
+            return None
+
+    async def get_tautulli_thumbnail(self, tautulli_data: Dict[str, Any]) -> Optional[discord.File]:
+        """Fetch thumbnail image from Tautulli's image proxy."""
+        if not self.TAUTULLI_URL or not self.TAUTULLI_API_KEY:
+            return None
+
+        try:
+            # Get thumb path from Tautulli data
+            media_type = tautulli_data.get("media_type", "")
+            
+            # For episodes, prefer series poster (grandparent_thumb)
+            if media_type == "episode":
+                thumb = tautulli_data.get("grandparent_thumb", "")
+                if not thumb:
+                    thumb = tautulli_data.get("thumb", "")
+            else:
+                # For movies/music, use item thumb
+                thumb = tautulli_data.get("thumb", "")
+                if not thumb:
+                    thumb = tautulli_data.get("art", "")
+            
+            if not thumb:
+                return None
+            
+            # Build Tautulli image proxy URL
+            base_url = self.TAUTULLI_URL.rstrip("/")
+            url = f"{base_url}/pms_image_proxy"
+            params = {
+                "img": thumb,
+                "width": 300,
+                "height": 450,
+                "fallback": "poster",
+                "apikey": self.TAUTULLI_API_KEY
+            }
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, params=params) as response:
+                    if response.status == 200:
+                        data = await response.read()
+                        if data:
+                            return discord.File(io.BytesIO(data), filename="poster.jpg")
+            return None
+        except Exception as e:
+            self.logger.error(f"Error fetching thumbnail from Tautulli: {e}")
             return None
 
     def get_server_info(self) -> Dict[str, Any]:
@@ -216,42 +1044,6 @@ class PlexCore(commands.Cog):
             and (self.stream_debug and self.logger.debug(f"Formatted Stream Info:\n{stream_info}\n{'='*50}") or True)
         ]
 
-    def _debug_session_details(self, session, idx: int) -> None:
-        """Log detailed Plex session information for debugging."""
-        self.logger.debug(f"\n{'='*50}\nSession {idx} Raw Data:")
-        self.logger.debug(f"Type: {session.type}")
-        self.logger.debug(f"Title: {session.title}")
-        self.logger.debug(f"User: {session.usernames[0] if session.usernames else 'Unknown'}")
-        self.logger.debug(f"Player: {session.players[0].product if session.players else 'Unknown'}")
-
-        if hasattr(session, "media") and session.media:
-            media = session.media[0]
-            self.logger.debug("\nMedia Info:")
-            self.logger.debug(f"Resolution: {getattr(media, 'videoResolution', 'Unknown')}")
-            self.logger.debug(f"Bitrate: {getattr(media, 'bitrate', 'Unknown')}")
-            self.logger.debug(f"Duration: {session.duration if hasattr(session, 'duration') else 'Unknown'}")
-
-            if hasattr(media, "parts") and media.parts:
-                self.logger.debug("\nAudio Streams:")
-                for part in media.parts:
-                    if hasattr(part, "streams"):
-                        for stream in part.streams:
-                            if getattr(stream, "streamType", None) == 2:  # Audio stream
-                                self.logger.debug(f"Language: {getattr(stream, 'language', 'Unknown')}")
-                                self.logger.debug(f"Language Code: {getattr(stream, 'languageCode', 'Unknown')}")
-                                self.logger.debug(f"Selected: {getattr(stream, 'selected', False)}")
-
-        if hasattr(session, "viewOffset"):
-            progress = (session.viewOffset / session.duration * 100) if session.duration else 0
-            self.logger.debug("\nProgress Info:")
-            self.logger.debug(f"View Offset: {session.viewOffset}")
-            self.logger.debug(f"Progress: {progress:.2f}%")
-
-        self.logger.debug("\nTranscode Info:")
-        self.logger.debug(f"Transcoding: {session.transcodeSession is not None}")
-        if session.transcodeSession:
-            self.logger.debug(f"Transcode Data: {vars(session.transcodeSession)}")
-
     def format_stream_info(self, session, idx: int) -> str:
         """Format Plex stream details into a displayable string."""
         try:
@@ -339,6 +1131,165 @@ class PlexCore(commands.Cog):
         # Handle movies - keep full title with year
         year = f" ({session.year})" if hasattr(session, "year") and session.year else ""
         return f"{session.title}{year}"
+
+    async def get_stream_thumbnail_file(self, session) -> Optional[discord.File]:
+        """Download thumbnail and return as Discord File."""
+        try:
+            if not self.plex:
+                return None
+            
+            # Determine best thumbnail path
+            content_type = getattr(session, "type", "unknown")
+            thumb_path = None
+            
+            if content_type == "episode":
+                # For TV shows, prefer show poster over episode thumbnail
+                thumb_path = getattr(session, "grandparentThumb", None) or getattr(session, "thumb", None)
+            else:
+                # For movies and music
+                thumb_path = getattr(session, "thumb", None)
+            
+            # Fallback to art
+            if not thumb_path:
+                thumb_path = getattr(session, "art", None)
+                
+            if not thumb_path:
+                return None
+
+            # Get full URL with token
+            url = self.plex.url(thumb_path, includeToken=True)
+            self.logger.debug(f"Downloading thumbnail from: {url[:100]}...")
+
+            # Download image using aiohttp
+            async with aiohttp.ClientSession() as http_session:
+                async with http_session.get(url) as response:
+                    if response.status == 200:
+                        data = await response.read()
+                        return discord.File(io.BytesIO(data), filename="poster.jpg")
+                    else:
+                        self.logger.warning(f"Failed to download thumbnail: {response.status}")
+                        return None
+                        
+        except Exception as e:
+            self.logger.error(f"Error downloading thumbnail: {e}", exc_info=True)
+            return None
+
+    def get_transcoding_details(self, session) -> Dict[str, Any]:
+        """Extract detailed transcoding information from a Plex session."""
+        try:
+            transcode_session = getattr(session, "transcodeSession", None)
+            
+            # --- Subtitle Logic (always check, even if not transcoding video/audio) ---
+            subtitle_decision = "none"
+            subtitle_codec = "Unknown"
+            subtitle_language = "Unknown"
+            subtitle_forced = False
+            
+            media = session.media[0] if hasattr(session, "media") and session.media else None
+            
+            if media and hasattr(media, "parts") and media.parts:
+                for part in media.parts:
+                    if hasattr(part, "streams"):
+                        for stream in part.streams:
+                            # Stream Type 3 is Subtitle
+                            if getattr(stream, "streamType", None) == 3 and getattr(stream, "selected", False):
+                                subtitle_codec = getattr(stream, "codec", "Unknown").upper()
+                                subtitle_language = getattr(stream, "languageCode", getattr(stream, "language", "Unknown"))
+                                subtitle_forced = getattr(stream, "forced", False)
+                                
+                                # Check decision
+                                stream_decision = getattr(stream, "decision", "")
+                                if not stream_decision and transcode_session:
+                                    # Fallback to transcode session if stream has no decision
+                                    # Note: Plex API is sometimes inconsistent here
+                                    pass
+                                
+                                subtitle_decision = stream_decision if stream_decision else "burn" if transcode_session else "direct"
+                                break
+
+            if not transcode_session:
+                # Even if not full transcoding, we might have subtitle info
+                return {
+                    "transcoding": False, 
+                    "subtitle_decision": subtitle_decision,
+                    "subtitle_codec": subtitle_codec,
+                    "subtitle_language": subtitle_language,
+                    "subtitle_forced": subtitle_forced
+                }
+            
+            # --- Transcoding Logic ---
+            
+            # Get original codecs from transcode session (these are the source codecs)
+            original_video_codec = getattr(transcode_session, "sourceVideoCodec", "Unknown").upper()
+            original_audio_codec = getattr(transcode_session, "sourceAudioCodec", "Unknown").upper()
+            
+            # Get target codecs
+            target_video_codec = getattr(transcode_session, "videoCodec", "Unknown").upper()
+            target_audio_codec = getattr(transcode_session, "audioCodec", "Unknown").upper()
+            
+            # Get container info
+            # BEST WAY: Fetch the original item from Plex library to get true original container
+            # session.media often reflects the current stream (e.g. mp4 for direct stream of mkv)
+            original_container = "Unknown"
+            try:
+                if hasattr(session, 'ratingKey'):
+                    original_item = self.plex.fetchItem(session.ratingKey)
+                    if original_item and original_item.media:
+                        original_container = getattr(original_item.media[0], "container", "Unknown").upper()
+                        # Also update codecs if they were unknown
+                        if original_video_codec == "UNKNOWN":
+                            original_video_codec = getattr(original_item.media[0], "videoCodec", "Unknown").upper()
+                        if original_audio_codec == "UNKNOWN":
+                            original_audio_codec = getattr(original_item.media[0], "audioCodec", "Unknown").upper()
+            except Exception as e:
+                self.logger.debug(f"Failed to fetch original item: {e}")
+                # Fallback to existing logic if fetch fails
+                original_container = getattr(media, "container", "Unknown").upper() if media else "Unknown"
+                if original_container == "UNKNOWN" and media and hasattr(media, "parts") and media.parts:
+                    original_container = getattr(media.parts[0], "container", "Unknown").upper()
+
+            # Target container is in the TranscodeSession object (destination)
+            target_container = getattr(transcode_session, "container", "Unknown").upper()
+            
+            # Get decisions
+            video_decision = getattr(transcode_session, "videoDecision", "Unknown")
+            audio_decision = getattr(transcode_session, "audioDecision", "Unknown")
+            container_decision = getattr(transcode_session, "containerDecision", "Unknown")
+            
+            # Fix container decision if it's unknown but containers are different
+            if container_decision == "Unknown":
+                if original_container != target_container and original_container != "UNKNOWN" and target_container != "UNKNOWN":
+                    container_decision = "transcode"
+                elif original_container == target_container:
+                    container_decision = "copy"
+            
+            # DEBUG: Log raw attributes to find the correct container info
+            self.logger.debug(f"DEBUG TRANSCODE: video_decision={video_decision}, container_decision={container_decision}")
+            self.logger.debug(f"DEBUG TRANSCODE: original_container={original_container}, target_container={target_container}")
+            
+            return {
+                "transcoding": True,
+                "video_decision": video_decision,
+                "audio_decision": audio_decision,
+                "container_decision": container_decision,
+                "transcode_reasons": getattr(transcode_session, "transcodeReasons", "Unknown"),
+                "original_video_codec": original_video_codec,
+                "target_video_codec": target_video_codec,
+                "original_audio_codec": original_audio_codec,
+                "target_audio_codec": target_audio_codec,
+                "original_container": original_container,
+                "target_container": target_container,
+                "transcode_speed": getattr(transcode_session, "speed", None),
+                "transcode_progress": getattr(transcode_session, "progress", None),
+                # Subtitle info
+                "subtitle_decision": subtitle_decision,
+                "subtitle_codec": subtitle_codec,
+                "subtitle_language": subtitle_language,
+                "subtitle_forced": subtitle_forced
+            }
+        except Exception as e:
+            self.logger.error(f"Error extracting transcoding details: {e}", exc_info=True)
+            return {"transcoding": False, "error": str(e)}
 
     def get_offline_info(self) -> Dict[str, Any]:
         """Generate server info when Plex is offline, respecting config order."""
@@ -428,7 +1379,7 @@ class PlexCore(commands.Cog):
                 info["last_offline"] = uptime_data[6] if uptime_data[6] else "Not available"
 
             embed = await self.create_dashboard_embed(info)
-            await self._update_dashboard_message(channel, embed)
+            await self._update_dashboard_message(channel, embed, info)
         except Exception as e:
             self.logger.error(f"Error updating dashboard: {e}")
 
@@ -508,24 +1459,31 @@ class PlexCore(commands.Cog):
         else:
             embed.add_field(name="Current Streams:", value="💤 *No active streams currently*", inline=False)
 
+        # SABnzbd Downloads Section - only show if SABnzbd is configured
         sabnzbd_cog = self.bot.get_cog("SABnzbd")
-        if info.get("downloads", {}).get("downloads"):
-            downloads = info["downloads"]["downloads"][:4]
-            download_count = len(info["downloads"]["downloads"])
-            downloads_text = "\n".join(
-                sabnzbd_cog.format_download_info(download, i)
-                for i, download in enumerate(downloads)
-            )
-            embed.add_field(
-                name=f"{download_count} current Download{'s' if download_count != 1 else ''}:",
-                value=downloads_text,
-                inline=False,
-            )
-            embed.add_field(name="Downloads 📥", value=f"```{self._calculate_total_size(downloads)}```", inline=True)
-            embed.add_field(name="Free Space 💾", value=f"```{info['downloads']['diskspace1']}```", inline=True)
-            embed.add_field(name="Total Space 🗄️", value=f"```{info['downloads']['diskspacetotal1']}```", inline=True)
-        else:
-            embed.add_field(name="Current Downloads:", value="💤 *No active downloads currently*", inline=False)
+        download_info = info.get("downloads", {})
+        
+        # Only show SABnzbd section if it's configured
+        if sabnzbd_cog and download_info.get("configured", False):
+            if download_info.get("downloads"):
+                # Active downloads
+                downloads = download_info["downloads"][:4]
+                download_count = len(download_info["downloads"])
+                downloads_text = " ".join(
+                    sabnzbd_cog.format_download_info(download, i)
+                    for i, download in enumerate(downloads)
+                )
+                embed.add_field(
+                    name=f"{download_count} current Download{'s' if download_count != 1 else ''}:",
+                    value=downloads_text,
+                    inline=False,
+                )
+                embed.add_field(name="Downloads 📥", value=f"```{self._calculate_total_size(downloads)}```", inline=True)
+                embed.add_field(name="Free Space 💾", value=f"```{download_info['diskspace1']}```", inline=True)
+                embed.add_field(name="Total Space 🗄️", value=f"```{download_info['diskspacetotal1']}```", inline=True)
+            elif download_info.get("show_when_empty", False):
+                # No active downloads - only show if show_when_empty is True
+                embed.add_field(name="Current Downloads:", value="💤 *No active downloads currently*", inline=False)
 
     def _calculate_total_size(self, downloads: List[Dict[str, Any]]) -> str:
         """Calculate total download size in human-readable format."""
@@ -538,19 +1496,29 @@ class PlexCore(commands.Cog):
             total_size_mb += value / 1024 if unit == "KB" else value if unit == "MB" else value * 1024 if unit == "GB" else 0
         return f"{total_size_mb / 1024:.2f} GB" if total_size_mb >= 1024 else f"{total_size_mb:.2f} MB"
 
-    async def _update_dashboard_message(self, channel: discord.TextChannel, embed: discord.Embed) -> None:
+    async def _update_dashboard_message(self, channel: discord.TextChannel, embed: discord.Embed, info: Dict[str, Any]) -> None:
         """Update or create the dashboard message in the specified channel."""
+        # Create view with buttons if there are active streams
+        view = None
+        if info.get("current_streams") and len(info["current_streams"]) > 0:
+            try:
+                await self.stream_view.create_buttons(info["current_streams"])
+                view = self.stream_view
+                self.logger.debug(f"Created {len(self.stream_view.children)} stream detail buttons")
+            except Exception as e:
+                self.logger.error(f"Error creating stream buttons: {e}")
+        
         if self.dashboard_message_id:
             try:
                 message = await channel.fetch_message(self.dashboard_message_id)
-                await message.edit(embed=embed)
+                await message.edit(embed=embed, view=view)
                 self.logger.debug("Dashboard message updated successfully")
             except discord.NotFound:
                 self.logger.warning("Dashboard message not found, creating new one")
                 self.dashboard_message_id = None
 
         if not self.dashboard_message_id:
-            message = await channel.send(embed=embed)
+            message = await channel.send(embed=embed, view=view)
             self.dashboard_message_id = message.id
             self._save_message_id(self.dashboard_message_id)
             self.logger.info(f"New dashboard message created with ID: {self.dashboard_message_id}")

@@ -22,21 +22,49 @@ class SABnzbd(commands.Cog):
         # Path to config.json
         self.current_dir = os.path.dirname(os.path.abspath(__file__))
         self.CONFIG_FILE = os.path.join(self.current_dir, "..", "data", "config.json")
-        self.keywords = self._load_keywords()
+        self.config = self._load_config()
+        
+    @property
+    def keywords(self) -> List[str]:
+        """Get keywords from config."""
+        return self.config.get("keywords", ["AC3", "DL", "German", "1080p", "2160p", "4K", "GERMAN"])
+    
+    @property
+    def show_when_empty(self) -> bool:
+        """Show 'No active downloads' message when queue is empty."""
+        return self.config.get("show_when_empty", False)
+    
+    @property
+    def show_numbers(self) -> bool:
+        """Show number emojis before download names."""
+        return self.config.get("show_numbers", False)
+    
+    def is_configured(self) -> bool:
+        """Check if SABnzbd is properly configured."""
+        return bool(self.SABNZBD_URL and self.SABNZBD_API_KEY)
 
-    def _load_keywords(self) -> List[str]:
-        """Load SABnzbd keywords from config.json with defaults if unavailable."""
-        default_keywords = ["AC3", "DL", "German", "1080p", "2160p", "4K", "GERMAN"]
+    def _load_config(self) -> Dict[str, Any]:
+        """Load SABnzbd config from config.json with defaults if unavailable."""
+        default_config = {
+            "keywords": ["AC3", "DL", "German", "1080p", "2160p", "4K", "GERMAN"],
+            "show_when_empty": False,
+            "show_numbers": False
+        }
         try:
             with open(self.CONFIG_FILE, "r", encoding="utf-8") as f:
                 config = json.load(f)
-                return config.get("sabnzbd", {}).get("keywords", default_keywords)
+                sabnzbd_config = config.get("sabnzbd", {})
+                return {**default_config, **sabnzbd_config}
         except (FileNotFoundError, json.JSONDecodeError) as e:
-            self.logger.error(f"Failed to load SABnzbd keywords: {e}. Using defaults.")
-            return default_keywords
+            self.logger.error(f"Failed to load SABnzbd config: {e}. Using defaults.")
+            return default_config
 
     async def get_sabnzbd_info(self) -> Dict[str, Any]:
         """Fetch download queue and disk space information from SABnzbd API."""
+        # Return empty if not configured
+        if not self.is_configured():
+            return {"downloads": [], "diskspace1": "Unknown", "diskspacetotal1": "Unknown", "configured": False}
+        
         url = urljoin(self.SABNZBD_URL, "api")
         params = {"apikey": self.SABNZBD_API_KEY, "output": "json", "mode": "queue"}
         try:
@@ -45,19 +73,22 @@ class SABnzbd(commands.Cog):
                     if not response.ok:
                         error_text = await response.text()
                         self.logger.error(f"SABnzbd API error - Status {response.status}: {error_text}")
-                        return {"downloads": [], "diskspace1": "Unknown", "diskspacetotal1": "Unknown"}
+                        return {"downloads": [], "diskspace1": "Unknown", "diskspacetotal1": "Unknown", "configured": True}
                     data = await response.json()
 
             queue = data.get("queue", {})
             slots = queue.get("slots", [])
-            disk_space = queue.get("diskspace1", "Unknown")
-            total_disk_space = queue.get("diskspacetotal1", "Unknown")
+            
+            disk_space = self._format_size_diskspace(queue.get("diskspace1", "Unknown"))
+            total_disk_space = self._format_size_diskspace(queue.get("diskspacetotal1", "Unknown"), "TB")
 
             if not slots:
                 return {
                     "downloads": [],
-                    "diskspace1": self._format_size_diskspace(disk_space),
-                    "diskspacetotal1": self._format_size_diskspace(total_disk_space, "TB"),
+                    "diskspace1": disk_space,
+                    "diskspacetotal1": total_disk_space,
+                    "configured": True,
+                    "show_when_empty": self.show_when_empty,
                 }
 
             downloads = [
@@ -72,12 +103,14 @@ class SABnzbd(commands.Cog):
             ]
             return {
                 "downloads": downloads,
-                "diskspace1": self._format_size_diskspace(disk_space),
-                "diskspacetotal1": self._format_size_diskspace(total_disk_space, "TB"),
+                "diskspace1": disk_space,
+                "diskspacetotal1": total_disk_space,
+                "configured": True,
+                "show_when_empty": self.show_when_empty,
             }
         except aiohttp.ClientError as e:
             self.logger.error(f"SABnzbd API request failed: {e}")
-            return {"downloads": [], "diskspace1": "Unknown", "diskspacetotal1": "Unknown"}
+            return {"downloads": [], "diskspace1": "Unknown", "diskspacetotal1": "Unknown", "configured": True}
 
     def _format_size(self, size: str) -> str:
         """Convert size to human-readable format with appropriate units."""
@@ -114,10 +147,8 @@ class SABnzbd(commands.Cog):
             return size
 
     def format_download_info(self, download: Dict[str, Any], index: int) -> str:
-        """Format download details into a Discord-friendly string with numbered emoji."""
+        """Format download details into a Discord-friendly string."""
         try:
-            number_emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣"]
-            emoji = number_emojis[index] if index < len(number_emojis) else "➡️"
             progress_percent = float(download["progress"])
             progress_bar = f"[{'▓' * int(progress_percent / 10)}{'░' * (10 - int(progress_percent / 10))}]"
             name = download["name"]
@@ -128,8 +159,15 @@ class SABnzbd(commands.Cog):
             if len(name) > 40:
                 name = name[:37] + "..."
 
+            # Optional number prefix
+            if self.show_numbers:
+                number_emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣"]
+                prefix = f"{number_emojis[index]} " if index < len(number_emojis) else "➡️ "
+            else:
+                prefix = ""
+
             return (
-                f"**```{emoji} {name}\n"
+                f"**```{prefix}{name}\n"
                 f"└─ {progress_bar} {progress_percent:.1f}% | {download['timeleft']} remaining\n"
                 f" └─ 📊 {download['speed']} | Size: {download['size']}```**"
             )
