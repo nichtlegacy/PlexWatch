@@ -5,6 +5,7 @@ import time
 import json
 import yaml
 import os
+import shutil
 import logging
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, List
@@ -777,6 +778,10 @@ class PlexCore(commands.Cog):
         self.MESSAGE_ID_FILE = os.path.join(self.current_dir, "..", "data", "dashboard_message_id.json")
         self.CONFIG_FILE = os.path.join(self.current_dir, "..", "data", "config.yaml")
         self.CONFIG_FILE_JSON = os.path.join(self.current_dir, "..", "data", "config.json")  # For backward compatibility
+        self.USER_MAPPING_FILE_JSON = os.path.join(self.current_dir, "..", "data", "user_mapping.json")  # For backward compatibility
+
+        # Auto-migrate from JSON to YAML if needed
+        self._auto_migrate_config()
 
         # Initialize state
         self.config = self._load_config()
@@ -807,6 +812,67 @@ class PlexCore(commands.Cog):
         self.user_mapping = self._load_user_mapping()
         self.update_status.start()
         self.update_dashboard.start()
+
+    def _auto_migrate_config(self) -> None:
+        """Automatically migrate from JSON to YAML format if JSON files exist and YAML doesn't."""
+        data_dir = os.path.join(self.current_dir, "..", "data")
+        config_yaml_exists = os.path.exists(self.CONFIG_FILE)
+        config_json_exists = os.path.exists(self.CONFIG_FILE_JSON)
+        user_mapping_json_exists = os.path.exists(self.USER_MAPPING_FILE_JSON)
+        
+        # Only migrate if YAML doesn't exist but JSON does
+        if not config_yaml_exists and (config_json_exists or user_mapping_json_exists):
+            self.logger.warning("=" * 60)
+            self.logger.warning("AUTO-MIGRATION: Converting JSON config to YAML format")
+            self.logger.warning("=" * 60)
+            
+            try:
+                # Load existing JSON config
+                config_data = {}
+                if config_json_exists:
+                    self.logger.info(f"Loading config from {self.CONFIG_FILE_JSON}")
+                    with open(self.CONFIG_FILE_JSON, "r", encoding="utf-8") as f:
+                        config_data = json.load(f)
+                    
+                    # Create backup
+                    backup_path = f"{self.CONFIG_FILE_JSON}.bak"
+                    shutil.copy2(self.CONFIG_FILE_JSON, backup_path)
+                    self.logger.info(f"Backup created: {backup_path}")
+                
+                # Load user_mapping if it exists
+                user_mapping_data = {}
+                if user_mapping_json_exists:
+                    self.logger.info(f"Loading user_mapping from {self.USER_MAPPING_FILE_JSON}")
+                    with open(self.USER_MAPPING_FILE_JSON, "r", encoding="utf-8") as f:
+                        user_mapping_data = json.load(f)
+                    
+                    # Create backup
+                    backup_path = f"{self.USER_MAPPING_FILE_JSON}.bak"
+                    shutil.copy2(self.USER_MAPPING_FILE_JSON, backup_path)
+                    self.logger.info(f"Backup created: {backup_path}")
+                
+                # Merge user_mapping into config_data
+                if user_mapping_data:
+                    config_data["user_mapping"] = user_mapping_data
+                
+                # Write to YAML
+                self.logger.info(f"Writing merged config to {self.CONFIG_FILE}")
+                with open(self.CONFIG_FILE, "w", encoding="utf-8") as f:
+                    yaml.dump(config_data, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+                
+                self.logger.warning("✓ Migration completed successfully!")
+                self.logger.warning(f"✓ Old JSON files backed up with .bak extension")
+                self.logger.warning(f"✓ New config.yaml created at {self.CONFIG_FILE}")
+                self.logger.warning("=" * 60)
+                
+            except Exception as e:
+                self.logger.error(f"Auto-migration failed: {e}")
+                self.logger.error("Bot will continue with JSON fallback. Please migrate manually.")
+                import traceback
+                self.logger.error(traceback.format_exc())
+        elif config_json_exists or user_mapping_json_exists:
+            # YAML exists but JSON also exists - warn but don't migrate
+            self.logger.warning("Both YAML and JSON config files exist. Using YAML. Consider removing JSON files.")
 
     def _load_config(self) -> Dict[str, Any]:
         """Load configuration from config.yaml (or config.json for backward compatibility) with defaults if unavailable."""
