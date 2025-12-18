@@ -14,7 +14,7 @@ PlexWatch is a Discord bot that brings your Plex media server to life with a rea
 - **Plex Monitoring**: Displays active streams with details like title, user, progress, quality, and player info (up to 8 streams).
 - **SABnzbd Integration**: Tracks ongoing downloads with progress, speed, and size.
 - **Uptime Tracking**: Shows server uptime over 24h, 7d, and 30d with percentage and duration.
-- **Customizable Dashboard**: Updates every minute with a clean Discord embed, fully configurable via JSON.
+- **Customizable Dashboard**: Updates every minute with a clean Discord embed, fully configurable via YAML.
 - **Bot Presence**: Reflects Plex status and stream count in the bot's Discord status.
 - **Logging**: Detailed logs for debugging and tracking bot activity.
 
@@ -39,9 +39,8 @@ Here’s how PlexWatch looks in action:
 │  ├─ sabnzbd.py       # SABnzbd download tracking
 │  └─ uptime.py        # Server uptime monitoring
 ├─ /data               # Configuration and state files
-│  ├─ config.json      # Bot settings (e.g., dashboard config, Plex sections)
-│  ├─ dashboard_message_id.json  # Stores the ID of the dashboard message
-│  └─ user_mapping.json  # Maps Plex usernames to display names
+│  ├─ config.yaml      # Bot settings (dashboard config, Plex sections, user mapping)
+│  └─ dashboard_message_id.json  # Stores the ID of the dashboard message (runtime data)
 ├─ /logs               # Log files for debugging
 │  └─ plexwatch_debug.log  # Rotated debug logs (updated daily, 7-day backup)
 ├─ .env                # Environment variables (private, not tracked)
@@ -151,58 +150,67 @@ UPTIME_MONITOR_ID=your_monitor_id
 
 ## Configuration
 
-PlexWatch is customized via `/data/config.json`. Below is the structure with example values based on your setup:
+PlexWatch is customized via `/data/config.yaml`. Below is the structure with example values based on your setup:
 
-```json
-{
-    "dashboard": {
-        "name": "Your Plex Dashboard",
-        "icon_url": "https://example.com/icon.png",
-        "footer_icon_url": "https://example.com/icon.png"
-    },
-    "plex_sections": {
-        "show_all": false,
-        "sections": {
-            "Movies": {
-                "display_name": "Movies",
-                "emoji": "🎥",
-                "show_episodes": false
-            },
-            "Shows": {
-                "display_name": "Shows",
-                "emoji": "📺",
-                "show_episodes": true
-            },
-            "Documentaries": {
-                "display_name": "Documentaries",
-                "emoji": "📚",
-                "show_episodes": false
-            }
-        }
-    },
-    "presence": {
-        "sections": [
-            {
-                "section_title": "Movies",
-                "display_name": "Movies",
-                "emoji": "🎥"
-            },
-            {
-                "section_title": "Shows",
-                "display_name": "Shows",
-                "emoji": "📺"
-            }
-        ],
-        "offline_text": "🔴 Server Offline!",
-        "stream_text": "{count} active Stream{s} 🟢"
-    },
-    "cache": {
-        "library_update_interval": 900
-    },
-    "sabnzbd": {
-        "keywords": ["AC3", "DL", "German", "1080p", "2160p", "4K", "GERMAN", "English"]
-    }
-}
+```yaml
+# Dashboard configuration
+dashboard:
+  name: "Your Plex Dashboard"
+  icon_url: "https://example.com/icon.png"
+  footer_icon_url: "https://example.com/icon.png"
+
+# Plex library sections configuration
+plex_sections:
+  show_all: false
+  sections:
+    Movies:
+      display_name: "Movies"
+      emoji: "🎥"
+      show_episodes: false
+    Shows:
+      display_name: "Shows"
+      emoji: "📺"
+      show_episodes: true
+    Documentaries:
+      display_name: "Documentaries"
+      emoji: "📚"
+      show_episodes: false
+
+# Discord presence/status configuration
+presence:
+  sections:
+    - section_title: "Movies"
+      display_name: "Movies"
+      emoji: "🎥"
+    - section_title: "Shows"
+      display_name: "Shows"
+      emoji: "📺"
+  offline_text: "🔴 Server Offline!"
+  stream_text: "{count} active Stream{s} 🟢"
+
+# Cache settings
+cache:
+  library_update_interval: 900
+
+# SABnzbd configuration
+sabnzbd:
+  keywords:
+    - "AC3"
+    - "DL"
+    - "German"
+    - "1080p"
+    - "2160p"
+    - "4K"
+    - "GERMAN"
+    - "English"
+  show_when_empty: false
+  show_numbers: false
+
+# User mapping: Maps Plex usernames to custom display names
+user_mapping:
+  nichtlegacy: "LEGACY"
+  plexfan99: "Fan"
+  moviebuff: "Buff"
 ```
 
 ### Configuration Details
@@ -232,24 +240,14 @@ PlexWatch is customized via `/data/config.json`. Below is the structure with exa
 
 - **`sabnzbd`**:
   - `keywords`: List of keywords used to trim download names. The bot cuts off the name at the first occurrence of any keyword (e.g., "Movie.Name.German.1080p" becomes "Movie Name"), then limits it to 40 characters (truncating with "..." if longer). This ensures clean, readable names in the dashboard.
+  - `show_when_empty`: If `true`, shows "No active downloads" message when queue is empty.
+  - `show_numbers`: If `true`, shows number emojis (1️⃣, 2️⃣, etc.) before download names.
 
-## User Mapping
-
-The `/data/user_mapping.json` file allows you to personalize Plex usernames by mapping them to custom display names shown in the dashboard. This keeps the interface clean and user-friendly.
-
-**Example `user_mapping.json`**:
-```json
-{
-    "nichtlegacy": "LEGACY",
-    "plexfan99": "Fan",
-    "moviebuff": "Buff"
-}
-```
-
-- **Key**: The exact Plex username (case-sensitive).
-- **Value**: The custom name displayed in the dashboard.
-
-If a username is listed, its mapped name is used (e.g., "Alex" instead of "user123"); otherwise, the original Plex username is shown.
+- **`user_mapping`**:
+  - Maps Plex usernames to custom display names shown in the dashboard. This keeps the interface clean and user-friendly.
+  - **Key**: The exact Plex username (case-sensitive).
+  - **Value**: The custom name displayed in the dashboard.
+  - If a username is listed, its mapped name is used (e.g., "Alex" instead of "user123"); otherwise, the original Plex username is shown.
 
 ## Logging
 Logs are stored in `/logs/plexwatch_debug.log`:

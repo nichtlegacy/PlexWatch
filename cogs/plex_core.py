@@ -3,6 +3,7 @@ from discord.ext import commands, tasks
 from plexapi.server import PlexServer
 import time
 import json
+import yaml
 import os
 import logging
 from datetime import datetime, timedelta
@@ -774,8 +775,8 @@ class PlexCore(commands.Cog):
         # File paths
         self.current_dir = os.path.dirname(os.path.abspath(__file__))
         self.MESSAGE_ID_FILE = os.path.join(self.current_dir, "..", "data", "dashboard_message_id.json")
-        self.USER_MAPPING_FILE = os.path.join(self.current_dir, "..", "data", "user_mapping.json")
-        self.CONFIG_FILE = os.path.join(self.current_dir, "..", "data", "config.json")
+        self.CONFIG_FILE = os.path.join(self.current_dir, "..", "data", "config.yaml")
+        self.CONFIG_FILE_JSON = os.path.join(self.current_dir, "..", "data", "config.json")  # For backward compatibility
 
         # Initialize state
         self.config = self._load_config()
@@ -808,7 +809,7 @@ class PlexCore(commands.Cog):
         self.update_dashboard.start()
 
     def _load_config(self) -> Dict[str, Any]:
-        """Load configuration from config.json with defaults if unavailable."""
+        """Load configuration from config.yaml (or config.json for backward compatibility) with defaults if unavailable."""
         default_config = {
             "dashboard": {"name": "Plex Dashboard", "icon_url": "", "footer_icon_url": ""},
             "plex_sections": {"show_all": True, "sections": {}},
@@ -819,13 +820,31 @@ class PlexCore(commands.Cog):
             },
             "cache": {"library_update_interval": 900},
         }
-        try:
-            with open(self.CONFIG_FILE, "r", encoding="utf-8") as f:
-                config = json.load(f)
-                return {**default_config, **config}  # Merge with defaults
-        except (FileNotFoundError, json.JSONDecodeError) as e:
-            self.logger.error(f"Failed to load config: {e}. Using defaults.")
-            return default_config
+        
+        # Try loading YAML first (new format)
+        if os.path.exists(self.CONFIG_FILE):
+            try:
+                with open(self.CONFIG_FILE, "r", encoding="utf-8") as f:
+                    yaml_config = yaml.safe_load(f)
+                    # Remove user_mapping from config if present (it's loaded separately)
+                    config = {k: v for k, v in yaml_config.items() if k != "user_mapping"}
+                    return {**default_config, **config}  # Merge with defaults
+            except (yaml.YAMLError, Exception) as e:
+                self.logger.error(f"Failed to load YAML config: {e}. Trying JSON fallback.")
+        
+        # Fallback to JSON for backward compatibility
+        if os.path.exists(self.CONFIG_FILE_JSON):
+            self.logger.warning("Using legacy config.json. Please migrate to config.yaml.")
+            try:
+                with open(self.CONFIG_FILE_JSON, "r", encoding="utf-8") as f:
+                    config = json.load(f)
+                    return {**default_config, **config}  # Merge with defaults
+            except (FileNotFoundError, json.JSONDecodeError) as e:
+                self.logger.error(f"Failed to load JSON config: {e}. Using defaults.")
+                return default_config
+        
+        self.logger.warning("No config file found. Using defaults.")
+        return default_config
 
     def _load_message_id(self) -> Optional[int]:
         """Load the dashboard message ID from file."""
@@ -848,13 +867,30 @@ class PlexCore(commands.Cog):
             self.logger.error(f"Failed to save message ID: {e}")
 
     def _load_user_mapping(self) -> Dict[str, str]:
-        """Load user mapping from JSON file."""
-        try:
-            with open(self.USER_MAPPING_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError) as e:
-            self.logger.error(f"Failed to load user mapping: {e}")
-            return {}
+        """Load user mapping from config.yaml (or user_mapping.json for backward compatibility)."""
+        # Try loading from YAML first (new format)
+        if os.path.exists(self.CONFIG_FILE):
+            try:
+                with open(self.CONFIG_FILE, "r", encoding="utf-8") as f:
+                    yaml_config = yaml.safe_load(f)
+                    user_mapping = yaml_config.get("user_mapping", {})
+                    if user_mapping:
+                        return user_mapping
+            except (yaml.YAMLError, Exception) as e:
+                self.logger.error(f"Failed to load user mapping from YAML: {e}. Trying JSON fallback.")
+        
+        # Fallback to JSON for backward compatibility
+        user_mapping_file_json = os.path.join(self.current_dir, "..", "data", "user_mapping.json")
+        if os.path.exists(user_mapping_file_json):
+            self.logger.warning("Using legacy user_mapping.json. Please migrate to config.yaml.")
+            try:
+                with open(user_mapping_file_json, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except (FileNotFoundError, json.JSONDecodeError) as e:
+                self.logger.error(f"Failed to load user mapping from JSON: {e}")
+                return {}
+        
+        return {}
 
     def connect_to_plex(self) -> Optional[PlexServer]:
         """Attempt to establish a connection to the Plex server."""

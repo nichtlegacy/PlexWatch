@@ -3,6 +3,7 @@ import aiohttp
 import logging
 import os
 import json
+import yaml
 from typing import Dict, Any, List
 from dotenv import load_dotenv
 from urllib.parse import urljoin
@@ -19,9 +20,10 @@ class SABnzbd(commands.Cog):
         self.SABNZBD_URL = os.getenv("SABNZBD_URL")
         self.SABNZBD_API_KEY = os.getenv("SABNZBD_API_KEY")
 
-        # Path to config.json
+        # Path to config.yaml (or config.json for backward compatibility)
         self.current_dir = os.path.dirname(os.path.abspath(__file__))
-        self.CONFIG_FILE = os.path.join(self.current_dir, "..", "data", "config.json")
+        self.CONFIG_FILE = os.path.join(self.current_dir, "..", "data", "config.yaml")
+        self.CONFIG_FILE_JSON = os.path.join(self.current_dir, "..", "data", "config.json")  # For backward compatibility
         self.config = self._load_config()
         
     @property
@@ -44,20 +46,37 @@ class SABnzbd(commands.Cog):
         return bool(self.SABNZBD_URL and self.SABNZBD_API_KEY)
 
     def _load_config(self) -> Dict[str, Any]:
-        """Load SABnzbd config from config.json with defaults if unavailable."""
+        """Load SABnzbd config from config.yaml (or config.json for backward compatibility) with defaults if unavailable."""
         default_config = {
             "keywords": ["AC3", "DL", "German", "1080p", "2160p", "4K", "GERMAN"],
             "show_when_empty": False,
             "show_numbers": False
         }
-        try:
-            with open(self.CONFIG_FILE, "r", encoding="utf-8") as f:
-                config = json.load(f)
-                sabnzbd_config = config.get("sabnzbd", {})
-                return {**default_config, **sabnzbd_config}
-        except (FileNotFoundError, json.JSONDecodeError) as e:
-            self.logger.error(f"Failed to load SABnzbd config: {e}. Using defaults.")
-            return default_config
+        
+        # Try loading YAML first (new format)
+        if os.path.exists(self.CONFIG_FILE):
+            try:
+                with open(self.CONFIG_FILE, "r", encoding="utf-8") as f:
+                    yaml_config = yaml.safe_load(f)
+                    sabnzbd_config = yaml_config.get("sabnzbd", {})
+                    return {**default_config, **sabnzbd_config}
+            except (yaml.YAMLError, Exception) as e:
+                self.logger.error(f"Failed to load YAML config: {e}. Trying JSON fallback.")
+        
+        # Fallback to JSON for backward compatibility
+        if os.path.exists(self.CONFIG_FILE_JSON):
+            self.logger.warning("Using legacy config.json. Please migrate to config.yaml.")
+            try:
+                with open(self.CONFIG_FILE_JSON, "r", encoding="utf-8") as f:
+                    config = json.load(f)
+                    sabnzbd_config = config.get("sabnzbd", {})
+                    return {**default_config, **sabnzbd_config}
+            except (FileNotFoundError, json.JSONDecodeError) as e:
+                self.logger.error(f"Failed to load JSON config: {e}. Using defaults.")
+                return default_config
+        
+        self.logger.warning("No config file found. Using defaults.")
+        return default_config
 
     async def get_sabnzbd_info(self) -> Dict[str, Any]:
         """Fetch download queue and disk space information from SABnzbd API."""

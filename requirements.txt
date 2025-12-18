@@ -5,3 +5,4 @@ aiohttp
 python-dateutil
 uptime_kuma_api
 python-dotenv
+pyyaml
