@@ -1,0 +1,114 @@
+# PlexWatch Configuration File
+# Copy this file to config.yaml and adjust the values to match your setup
+
+# Dashboard: Appearance of the Discord embed dashboard
+# - name: Title at the top of the embed
+# - icon_url: Icon shown in author field and thumbnail
+# - footer_icon_url: Icon in the footer
+dashboard:
+  name: "Your Plex Dashboard"
+  icon_url: "https://example.com/icon.png"
+  footer_icon_url: "https://example.com/footer-icon.png"
+
+# Plex Library Sections: Which libraries to display in the dashboard
+# - show_all: true = show all libraries, false = only listed sections
+# - sections: Key must match EXACT Plex library name (case-sensitive, use quotes for spaces)
+#   - display_name: Name shown in dashboard (can differ from Plex name)
+#   - emoji: Icon displayed next to section name (examples: 🎥 🎬 🍿 📺 📡 📚 📖 🎵 🎶 🎤 🎧 👶 🧒 ⚽ 🏀 🎭)
+#   - show_episodes: true = show episode count for TV shows, false = hide for movies
+plex_sections:
+  show_all: false
+  sections:
+    Movies:
+      display_name: "Movies"
+      emoji: "🎥"
+      show_episodes: false
+    TV Shows:
+      display_name: "TV Shows"
+      emoji: "📺"
+      show_episodes: true
+    Documentaries:
+      display_name: "Documentaries"
+      emoji: "📚"
+      show_episodes: false
+    "Movies - 4K":
+      display_name: "Movies - 4K"
+      emoji: "🎥"
+      show_episodes: false
+
+# Discord Bot Presence: Status text shown below bot name in member list
+# - sections: Libraries to cycle through when idle (section_title must match plex_sections key)
+# - offline_text: Status when Plex server is offline
+# - stream_text: Status with active streams ({count} = stream count, {s} = "s" if plural)
+presence:
+  sections:
+    - section_title: "Movies"
+      display_name: "Movies"
+      emoji: "🎥"
+    - section_title: "TV Shows"
+      display_name: "TV Shows"
+      emoji: "📺"
+  offline_text: "🔴 Server Offline!"
+  stream_text: "{count} active Stream{s} 🟢"
+
+# Cache: How often to refresh Plex library cache (in seconds)
+# - library_update_interval: Default 900 (15 minutes). Lower = more API calls, Higher = potentially stale data
+cache:
+  library_update_interval: 900
+
+# SABnzbd: Download queue display settings (requires SABNZBD_URL and SABNZBD_API_KEY in .env)
+# - show_when_empty: true = show "No active downloads" when empty, false = hide section
+# - show_numbers: true = prefix downloads with number emojis (1️⃣, 2️⃣, etc.)
+# - keywords: Keywords to truncate filenames at (removes release tags, quality, etc.)
+sabnzbd:
+  show_when_empty: false
+  show_numbers: false
+  keywords:
+    # Languages & Audio
+    - "German"
+    - "GERMAN"
+    - "DL"           # Dual Language
+    - "Dubbed"
+    - "Subbed"
+    - "AC3"
+    - "AC3D"
+    - "EAC3"
+    - "AAC"
+    - "Atmos"
+    - "5.1"
+    
+    # Resolution
+    - "1080p"
+    - "1080P"        # Case variant
+    - "2160p"
+    - "4K"
+    - "720p"
+    - "UHD"
+    
+    # Video Quality & Features
+    - "HDR"
+    - "DV"           # Dolby Vision
+    - "10bit"
+    
+    # Codecs
+    - "x264"
+    - "x265"
+    - "h264"
+    - "h265"
+    - "HEVC"
+    - "AVC"
+    
+    # Sources & Formats
+    - "WEB"
+    - "BluRay"
+    - "BDRip"
+    - "REPACK"
+    - "Remux"
+
+# User Mapping: Maps Plex usernames to custom display names
+# Key = EXACT Plex username (case-sensitive, use quotes for spaces/special chars)
+# Value = Display name shown in dashboard
+user_mapping:
+  plexuser1: "User 1"
+  plexuser2: "User 2"
+  "User With Spaces": "Display Name"
